@@ -1,6 +1,9 @@
 (function () {
   'use strict';
 
+  if (window.__goldRateRelayInitialized) return;
+  window.__goldRateRelayInitialized = true;
+
   var themeConfig = window.GOLD_RATE_CONFIG || {};
 
   var CONFIG = {
@@ -13,7 +16,6 @@
     aedToSar: 1.02,
     aedToUsd: 0.2723,
     ratePollInterval: 60000,
-    cardFetchDebounce: 250,
     bullionPurity: {
       '999.9': 0.9999,
       '.9999': 0.9999,
@@ -35,11 +37,11 @@
     }
   };
 
-  var cardTimers = {};
-  var cardKeySequence = 0;
   var ratesTimestamp = null;
   var ratesPollTimer = null;
   var mutationTimer = null;
+  var socketIoPromise = null;
+  var relaySocket = null;
 
   function round2(value) {
     return Math.round(Number(value) * 100) / 100;
@@ -69,21 +71,60 @@
     });
   }
 
-  function apiUrl(path, params) {
-    var url = CONFIG.relayUrl.replace(/\/$/, '') + path;
+  function apiUrl(path) {
+    return CONFIG.relayUrl.replace(/\/$/, '') + path;
+  }
 
-    if (!params) return url;
+  function numberOrZero(value) {
+    var number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  }
 
-    var query = Object.keys(params)
-      .filter(function (key) {
-        return params[key] !== undefined && params[key] !== null;
-      })
-      .map(function (key) {
-        return encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
-      })
-      .join('&');
+  function getKaratRate(karat) {
+    var requested = String(karat || '22K').toUpperCase();
+    var configuredRate = Number(CONFIG.djgRetailRates[requested]);
 
-    return query ? url + '?' + query : url;
+    if (Number.isFinite(configuredRate)) return configuredRate;
+
+    var numericKarat = parseFloat(requested);
+    var rate24k = Number(CONFIG.djgRetailRates['24K'] || 0);
+
+    if (numericKarat > 0 && rate24k > 0) {
+      return rate24k * (numericKarat / 24);
+    }
+
+    return 0;
+  }
+
+  function calculateJewellery(data) {
+    var grams = numberOrZero(data.goldGrams);
+    var karatRate = getKaratRate(data.karat);
+    var diamondCt = numberOrZero(data.diamond);
+    var stoneCost = numberOrZero(data.stone);
+    var makingPct = numberOrZero(data.making || 12);
+
+    var goldCost = grams * karatRate;
+    var diamondCost = diamondCt * CONFIG.diamondRate;
+    var makingBase = data.makingOnTotal
+      ? goldCost + diamondCost + stoneCost
+      : goldCost;
+    var making = makingBase * (makingPct / 100);
+    var subtotal = goldCost + diamondCost + stoneCost + making;
+    var vatBase = data.vatOnAll ? subtotal : goldCost + making;
+
+    if (data.vatExempt) vatBase = 0;
+
+    var vat = vatBase * CONFIG.vatRate;
+
+    return {
+      total: Math.round(subtotal + vat),
+      goldCost: Math.round(goldCost),
+      diamCost: Math.round(diamondCost),
+      stoneCost: Math.round(stoneCost),
+      making: Math.round(making),
+      vat: Math.round(vat),
+      rateKarat: round2(karatRate)
+    };
   }
 
   function calculateBullion(offerUsd, grams, purity, vatExempt) {
@@ -220,11 +261,13 @@
       }
     }
 
-    grUpdateAllCards();
+    grUpdateCards(symbol);
   }
 
   function loadSocketIo() {
-    return new Promise(function (resolve, reject) {
+    if (socketIoPromise) return socketIoPromise;
+
+    socketIoPromise = new Promise(function (resolve, reject) {
       if (window.io) {
         resolve();
         return;
@@ -234,18 +277,25 @@
       script.src = CONFIG.socketIoCDN;
       script.async = true;
       script.onload = resolve;
-      script.onerror = reject;
+      script.onerror = function (error) {
+        socketIoPromise = null;
+        reject(error);
+      };
       document.head.appendChild(script);
     });
+
+    return socketIoPromise;
   }
 
   function connectRelay() {
+    if (relaySocket) return;
+
     if (!CONFIG.relayUrl) {
       console.error('[GoldRate] Missing relayUrl');
       return;
     }
 
-    var socket = window.io(CONFIG.relayUrl, {
+    relaySocket = window.io(CONFIG.relayUrl, {
       transports: ['websocket'],
       reconnection: true,
       reconnectionDelay: 1000,
@@ -253,38 +303,42 @@
       reconnectionAttempts: Infinity
     });
 
-    socket.on('connect', function () {
+    relaySocket.on('connect', function () {
       console.log('[GoldRate] Dedicated relay connected');
     });
 
-    socket.on('market-data', handleMarketData);
+    relaySocket.on('market-data', handleMarketData);
 
-    socket.on('market-status', function (data) {
+    relaySocket.on('market-status', function (data) {
       window.GoldRate.marketStatus = data.status || 'DISCONNECTED';
       dispatchMarketUpdate();
+      grUpdateAllCards();
     });
 
-    socket.on('disconnect', function () {
+    relaySocket.on('disconnect', function () {
       window.GoldRate.marketStatus = 'DISCONNECTED';
       dispatchMarketUpdate();
+      grUpdateAllCards();
     });
 
-    socket.on('connect_error', function (error) {
+    relaySocket.on('connect_error', function (error) {
       console.warn('[GoldRate] Relay connection failed:', error.message);
     });
 
     window.addEventListener('beforeunload', function () {
-      socket.disconnect();
+      relaySocket.disconnect();
     });
   }
 
-  function grCardKey(wrapper) {
-    if (!wrapper.dataset.grKey) {
-      cardKeySequence += 1;
-      wrapper.dataset.grKey = 'gold-rate-' + cardKeySequence;
-    }
+  function ensureRelayConnection() {
+    if (relaySocket) return;
+    if (!document.querySelector('.live-gold-price-wrapper')) return;
 
-    return wrapper.dataset.grKey;
+    loadSocketIo()
+      .then(connectRelay)
+      .catch(function (error) {
+        console.error('[GoldRate] Socket.IO client failed:', error);
+      });
   }
 
   function grApplyToCard(wrapper, result) {
@@ -298,8 +352,14 @@
         wrapper.dataset.bullion === 'true' ||
         wrapper.dataset.silver === 'true';
 
+      var total = Number(result.total);
+
+      if (wrapper.dataset.cartLineTotal === 'true') {
+        total *= Math.max(1, numberOrZero(wrapper.dataset.quantity));
+      }
+
       priceElement.textContent = formatAED(
-        result.total,
+        total,
         isCents ? 2 : 0
       );
 
@@ -340,47 +400,45 @@
     grApplyToCard(wrapper, result);
   }
 
-  function fetchJewelleryPrice(wrapper) {
-    var key = grCardKey(wrapper);
-    clearTimeout(cardTimers[key]);
+  function renderJewelleryCard(wrapper) {
+    var result = calculateJewellery({
+      goldGrams: wrapper.dataset.gold || 0,
+      karat: wrapper.dataset.karat || '22K',
+      diamond: wrapper.dataset.diamond || 0,
+      stone: wrapper.dataset.stone || 0,
+      making: wrapper.dataset.making || 12,
+      vatExempt: wrapper.dataset.vatExempt === 'true',
+      makingOnTotal: wrapper.dataset.makingOnTotal === 'true',
+      vatOnAll: wrapper.dataset.vatOnAll === 'true'
+    });
 
-    cardTimers[key] = setTimeout(function () {
-      fetch(apiUrl('/api/price', {
-        grams: wrapper.dataset.gold || 0,
-        karat: wrapper.dataset.karat || '22K',
-        diamond: wrapper.dataset.diamond || 0,
-        stone: wrapper.dataset.stone || 0,
-        making: wrapper.dataset.making || 12,
-        vatExempt: wrapper.dataset.vatExempt === 'true' ? 1 : 0,
-        makingOnTotal:
-          wrapper.dataset.makingOnTotal === 'true' ? 1 : 0,
-        vatOnAll: wrapper.dataset.vatOnAll === 'true' ? 1 : 0
-      }), { cache: 'no-store' })
-        .then(function (response) {
-          if (!response.ok) throw new Error('Price request failed');
-          return response.json();
-        })
-        .then(function (result) {
-          grApplyToCard(wrapper, result);
-        })
-        .catch(function (error) {
-          console.warn('[GoldRate] Jewellery price failed:', error);
-        });
-    }, CONFIG.cardFetchDebounce);
+    grApplyToCard(wrapper, result);
   }
 
-  function grUpdateAllCards() {
+  function grUpdateCards(updateType) {
     document
       .querySelectorAll('.live-gold-price-wrapper')
       .forEach(function (wrapper) {
-        if (wrapper.dataset.bullion === 'true') {
+        var isBullion = wrapper.dataset.bullion === 'true';
+        var isSilver = wrapper.dataset.silver === 'true';
+        var isJewellery = !isBullion && !isSilver;
+
+        if (updateType === 'GOLD' && !isBullion) return;
+        if (updateType === 'SILVER' && !isSilver) return;
+        if (updateType === 'RATES' && !isJewellery) return;
+
+        if (isBullion) {
           renderBullionCard(wrapper);
-        } else if (wrapper.dataset.silver === 'true') {
+        } else if (isSilver) {
           renderSilverCard(wrapper);
         } else {
-          fetchJewelleryPrice(wrapper);
+          renderJewelleryCard(wrapper);
         }
       });
+  }
+
+  function grUpdateAllCards() {
+    grUpdateCards();
   }
 
   function syncRates() {
@@ -395,7 +453,7 @@
         if (data.updatedAt !== ratesTimestamp) {
           ratesTimestamp = data.updatedAt;
           Object.assign(CONFIG.djgRetailRates, data.djgRetailRates);
-          grUpdateAllCards();
+          grUpdateCards('RATES');
         }
       })
       .catch(function (error) {
@@ -403,7 +461,19 @@
       });
   }
 
-  function startRatePolling() {
+  function hasJewelleryCards() {
+    return Array.prototype.some.call(
+      document.querySelectorAll('.live-gold-price-wrapper'),
+      function (wrapper) {
+        return wrapper.dataset.bullion !== 'true' &&
+          wrapper.dataset.silver !== 'true';
+      }
+    );
+  }
+
+  function ensureRatePolling() {
+    if (ratesPollTimer || !hasJewelleryCards()) return;
+
     syncRates();
 
     ratesPollTimer = setInterval(function () {
@@ -413,13 +483,26 @@
     }, CONFIG.ratePollInterval);
   }
 
+  function nodeContainsLivePriceCard(node) {
+    if (!node || node.nodeType !== 1) return false;
+
+    return node.matches('.live-gold-price-wrapper') ||
+      Boolean(node.querySelector('.live-gold-price-wrapper'));
+  }
+
   function observeDynamicCards() {
     var observer = new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i += 1) {
-        if (mutations[i].addedNodes.length) {
-          clearTimeout(mutationTimer);
-          mutationTimer = setTimeout(grUpdateAllCards, 0);
-          return;
+        for (var j = 0; j < mutations[i].addedNodes.length; j += 1) {
+          if (nodeContainsLivePriceCard(mutations[i].addedNodes[j])) {
+            clearTimeout(mutationTimer);
+            mutationTimer = setTimeout(function () {
+              grUpdateAllCards();
+              ensureRatePolling();
+              ensureRelayConnection();
+            }, 0);
+            return;
+          }
         }
       }
     });
@@ -431,23 +514,22 @@
   }
 
   function init() {
-    startRatePolling();
     grUpdateAllCards();
+    ensureRatePolling();
+    ensureRelayConnection();
 
     ['variant:update', 'theme:variant:update', 'variant:change']
       .forEach(function (eventName) {
         document.addEventListener(eventName, function () {
-          setTimeout(grUpdateAllCards, 0);
+          setTimeout(function () {
+            grUpdateAllCards();
+            ensureRatePolling();
+            ensureRelayConnection();
+          }, 0);
         });
       });
 
     observeDynamicCards();
-
-    loadSocketIo()
-      .then(connectRelay)
-      .catch(function (error) {
-        console.error('[GoldRate] Socket.IO client failed:', error);
-      });
   }
 
   if (document.readyState === 'loading') {
