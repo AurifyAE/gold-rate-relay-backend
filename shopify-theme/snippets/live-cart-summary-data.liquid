@@ -1,0 +1,34 @@
+{% comment %}
+  Provides the original Shopify cart values needed to replace only the
+  live-priced portion of the displayed estimated total.
+{% endcomment %}
+
+{%- liquid
+  assign live_cart_line_count = 0
+  assign shopify_live_lines_total = 0
+
+  for item in cart.items
+    assign live_gold_weight = item.product.metafields.custom.gold_weight.value
+    assign live_silver_weight = item.product.metafields.custom.silver_weight.value
+    assign has_live_cart_price = false
+
+    if live_silver_weight != blank and live_silver_weight != 0
+      assign has_live_cart_price = true
+    elsif live_gold_weight != blank and live_gold_weight != 0
+      assign has_live_cart_price = true
+    endif
+
+    if has_live_cart_price
+      assign live_cart_line_count = live_cart_line_count | plus: 1
+      assign shopify_live_lines_total = shopify_live_lines_total | plus: item.original_line_price
+    endif
+  endfor
+-%}
+
+<span
+  hidden
+  data-live-cart-summary-data
+  data-live-cart-line-count="{{ live_cart_line_count }}"
+  data-shopify-cart-total-cents="{{ cart.total_price }}"
+  data-shopify-live-lines-total-cents="{{ shopify_live_lines_total }}"
+></span>

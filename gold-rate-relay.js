@@ -40,6 +40,7 @@
   var ratesTimestamp = null;
   var ratesPollTimer = null;
   var mutationTimer = null;
+  var cartSummaryTimer = null;
   var socketIoPromise = null;
   var relaySocket = null;
 
@@ -233,6 +234,121 @@
     }));
   }
 
+  function setTextIfChanged(element, value) {
+    if (element && element.textContent !== value) {
+      element.textContent = value;
+    }
+  }
+
+  function updateLiveCartSummaries() {
+    var lineTotals = {};
+
+    document
+      .querySelectorAll(
+        '.cart-live-price-wrapper[data-cart-line-total="true"]' +
+        '[data-live-line-total]'
+      )
+      .forEach(function (wrapper, index) {
+        var total = Number(wrapper.dataset.liveLineTotal);
+        var row = wrapper.closest('[id^="CartItem-"]');
+        var key = row ? row.id : 'live-cart-line-' + index;
+
+        if (Number.isFinite(total) && lineTotals[key] === undefined) {
+          lineTotals[key] = total;
+        }
+      });
+
+    var readyLineKeys = Object.keys(lineTotals);
+    var currentLiveTotal = readyLineKeys.reduce(function (sum, key) {
+      return sum + lineTotals[key];
+    }, 0);
+
+    document
+      .querySelectorAll('[data-live-cart-summary-data]')
+      .forEach(function (summaryData) {
+        var expectedLineCount = Number(
+          summaryData.dataset.liveCartLineCount || 0
+        );
+
+        if (!expectedLineCount || readyLineKeys.length < expectedLineCount) {
+          return;
+        }
+
+        var shopifyCartTotal =
+          numberOrZero(summaryData.dataset.shopifyCartTotalCents) / 100;
+        var originalLiveTotal =
+          numberOrZero(summaryData.dataset.shopifyLiveLinesTotalCents) / 100;
+        var liveEstimatedTotal = Math.max(
+          0,
+          shopifyCartTotal - originalLiveTotal + currentLiveTotal
+        );
+        var cartTotals = summaryData.closest('.cart-totals');
+        var totalElement = cartTotals &&
+          cartTotals.querySelector('[data-cart-subtotal]');
+
+        if (!totalElement) return;
+
+        var formattedTotal = formatAED(liveEstimatedTotal, 2);
+
+        setTextIfChanged(totalElement, formattedTotal);
+
+        if (totalElement.getAttribute('value') !== formattedTotal) {
+          totalElement.setAttribute('value', formattedTotal);
+        }
+
+        totalElement.dataset.liveRateTotal = 'true';
+        totalElement.removeAttribute('data-calculating');
+      });
+  }
+
+  function scheduleLiveCartSummaryUpdate() {
+    clearTimeout(cartSummaryTimer);
+    cartSummaryTimer = setTimeout(updateLiveCartSummaries, 0);
+  }
+
+  function updateLiveRateBars() {
+    var goldRate = window.GoldRate.rate;
+    var silverRate = window.GoldRate.silverRate;
+    var marketStatus = window.GoldRate.marketStatus;
+    var state = 'loading';
+    var statusLabel = 'Connecting';
+
+    if (marketStatus === 'TRADEABLE') {
+      state = 'live';
+      statusLabel = 'Market live';
+    } else if (marketStatus === 'DISCONNECTED') {
+      state = 'offline';
+      statusLabel = 'Reconnecting';
+    } else if (marketStatus === 'FALLBACK') {
+      state = 'closed';
+      statusLabel = 'Indicative rates';
+    } else if (marketStatus === 'CLOSED' || marketStatus === 'WEEKEND') {
+      state = 'closed';
+      statusLabel = 'Market closed';
+    }
+
+    document.querySelectorAll('[data-gold-rate-bar]').forEach(function (bar) {
+      bar.dataset.state = state;
+
+      setTextIfChanged(
+        bar.querySelector('[data-live-market-status]'),
+        statusLabel
+      );
+      setTextIfChanged(
+        bar.querySelector('[data-live-gold-rate]'),
+        Number.isFinite(goldRate) && goldRate > 0
+          ? formatAED(goldRate, 2) + '/g'
+          : 'Loading'
+      );
+      setTextIfChanged(
+        bar.querySelector('[data-live-silver-rate]'),
+        Number.isFinite(silverRate) && silverRate > 0
+          ? formatAED(silverRate, 2) + '/g'
+          : 'Loading'
+      );
+    });
+  }
+
   function handleMarketData(data) {
     if (!data || !data.symbol) return;
 
@@ -261,6 +377,7 @@
       }
     }
 
+    updateLiveRateBars();
     grUpdateCards(symbol);
   }
 
@@ -312,12 +429,14 @@
     relaySocket.on('market-status', function (data) {
       window.GoldRate.marketStatus = data.status || 'DISCONNECTED';
       dispatchMarketUpdate();
+      updateLiveRateBars();
       grUpdateAllCards();
     });
 
     relaySocket.on('disconnect', function () {
       window.GoldRate.marketStatus = 'DISCONNECTED';
       dispatchMarketUpdate();
+      updateLiveRateBars();
       grUpdateAllCards();
     });
 
@@ -332,7 +451,9 @@
 
   function ensureRelayConnection() {
     if (relaySocket) return;
-    if (!document.querySelector('.live-gold-price-wrapper')) return;
+    if (!document.querySelector(
+      '.live-gold-price-wrapper, [data-gold-rate-bar]'
+    )) return;
 
     loadSocketIo()
       .then(connectRelay)
@@ -356,6 +477,8 @@
 
       if (wrapper.dataset.cartLineTotal === 'true') {
         total *= Math.max(1, numberOrZero(wrapper.dataset.quantity));
+        wrapper.dataset.liveLineTotal = String(round2(total));
+        scheduleLiveCartSummaryUpdate();
       }
 
       priceElement.textContent = formatAED(
@@ -483,21 +606,25 @@
     }, CONFIG.ratePollInterval);
   }
 
-  function nodeContainsLivePriceCard(node) {
+  function nodeContainsRateConsumer(node) {
     if (!node || node.nodeType !== 1) return false;
 
-    return node.matches('.live-gold-price-wrapper') ||
-      Boolean(node.querySelector('.live-gold-price-wrapper'));
+    return node.matches('.live-gold-price-wrapper, [data-gold-rate-bar]') ||
+      Boolean(node.querySelector(
+        '.live-gold-price-wrapper, [data-gold-rate-bar]'
+      ));
   }
 
   function observeDynamicCards() {
     var observer = new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i += 1) {
         for (var j = 0; j < mutations[i].addedNodes.length; j += 1) {
-          if (nodeContainsLivePriceCard(mutations[i].addedNodes[j])) {
+          if (nodeContainsRateConsumer(mutations[i].addedNodes[j])) {
             clearTimeout(mutationTimer);
             mutationTimer = setTimeout(function () {
               grUpdateAllCards();
+              updateLiveRateBars();
+              scheduleLiveCartSummaryUpdate();
               ensureRatePolling();
               ensureRelayConnection();
             }, 0);
@@ -515,6 +642,8 @@
 
   function init() {
     grUpdateAllCards();
+    updateLiveRateBars();
+    scheduleLiveCartSummaryUpdate();
     ensureRatePolling();
     ensureRelayConnection();
 
@@ -523,6 +652,8 @@
         document.addEventListener(eventName, function () {
           setTimeout(function () {
             grUpdateAllCards();
+            updateLiveRateBars();
+            scheduleLiveCartSummaryUpdate();
             ensureRatePolling();
             ensureRelayConnection();
           }, 0);

@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const { Server } = require('socket.io');
 const { io: connectUpstream } = require('socket.io-client');
+const { createShopifyPriceSync } = require('./shopify-price-sync');
 
 const app = express();
 const server = http.createServer(app);
@@ -21,6 +22,11 @@ const usdToAed = Number(process.env.USD_TO_AED || 3.674);
 const vatRate = Number(process.env.VAT_RATE || 0.05);
 const diamondRate = Number(process.env.DIAMOND_RATE || 18000);
 const adminApiKey = process.env.ADMIN_API_KEY || '';
+
+function envBoolean(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  return value === 'true' || value === '1';
+}
 
 const troyOzToGram = 31.1035;
 
@@ -83,7 +89,7 @@ function getCorsOrigin(origin, callback) {
 app.use(
   cors({
     origin: getCorsOrigin,
-    methods: ['GET', 'PUT', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'X-Admin-Key']
   })
 );
@@ -225,6 +231,79 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function metafieldValue(product, field) {
+  return product && product[field] ? product[field].value : null;
+}
+
+function usableMarketOffer(symbol) {
+  const market = latestMarket[symbol];
+
+  if (!market || market.marketStatus === 'DISCONNECTED') return null;
+
+  const offer = Number(market.offer);
+  return Number.isFinite(offer) && offer > 0 ? offer : null;
+}
+
+function calculateShopifyTargetPrice(product) {
+  const goldWeight = numberOrZero(metafieldValue(product, 'goldWeight'));
+  const silverWeight = numberOrZero(
+    metafieldValue(product, 'silverWeight')
+  );
+  const purity = metafieldValue(product, 'goldPurity');
+
+  if (silverWeight > 0) {
+    const result = calculateSilver(
+      usableMarketOffer('SILVER'),
+      silverWeight,
+      false
+    );
+    return result ? { price: result.total, type: 'silver' } : null;
+  }
+
+  if (goldWeight > 0 && purity) {
+    const result = calculateBullion(
+      usableMarketOffer('GOLD'),
+      goldWeight,
+      purity,
+      false
+    );
+    return result ? { price: result.total, type: 'bullion' } : null;
+  }
+
+  if (goldWeight > 0) {
+    const result = calculateJewellery({
+      grams: goldWeight,
+      karat: metafieldValue(product, 'goldKarat') || '22K',
+      diamond: metafieldValue(product, 'diamondCarat') || 0,
+      stone: metafieldValue(product, 'stoneCost') || 0,
+      making: metafieldValue(product, 'makingPercentage') || 12,
+      vatExempt: false,
+      makingOnTotal: false,
+      vatOnAll: false
+    });
+    return result ? { price: result.total, type: 'jewellery' } : null;
+  }
+
+  return null;
+}
+
+const shopifyPriceSync = createShopifyPriceSync({
+  config: {
+    enabled: envBoolean(process.env.SHOPIFY_PRICE_SYNC_ENABLED, false),
+    dryRun: envBoolean(process.env.SHOPIFY_PRICE_SYNC_DRY_RUN, true),
+    storeDomain: process.env.SHOPIFY_STORE_DOMAIN,
+    accessToken: process.env.SHOPIFY_ADMIN_ACCESS_TOKEN,
+    apiVersion: process.env.SHOPIFY_API_VERSION || '2026-07',
+    currencyCode: process.env.SHOPIFY_PRICE_CURRENCY || 'AED',
+    intervalMs: process.env.SHOPIFY_PRICE_SYNC_INTERVAL_MS,
+    initialDelayMs: process.env.SHOPIFY_PRICE_SYNC_INITIAL_DELAY_MS,
+    minDelta: process.env.SHOPIFY_PRICE_MIN_DELTA_AED,
+    mutationDelayMs: process.env.SHOPIFY_PRICE_MUTATION_DELAY_MS
+  },
+  getTargetPrice: calculateShopifyTargetPrice,
+  logger: console
+});
+
 app.get('/api/health', function (req, res) {
   res.json({
     status: 'ok',
@@ -232,6 +311,7 @@ app.get('/api/health', function (req, res) {
     goldAvailable: Boolean(latestMarket.GOLD),
     silverAvailable: Boolean(latestMarket.SILVER),
     connectedClients: publicSocket.engine.clientsCount,
+    shopifyPriceSync: shopifyPriceSync.getStatus(),
     timestamp: nowIso()
   });
 });
@@ -268,10 +348,34 @@ app.put('/api/admin/rates', requireAdmin, function (req, res) {
   djgRetailRates = incomingRates;
   lastRatesUpdatedAt = nowIso();
 
+  shopifyPriceSync.sync('retail-rates-updated').catch(() => {});
+
   res.json({
     djgRetailRates,
     updatedAt: lastRatesUpdatedAt
   });
+});
+
+app.post('/api/admin/shopify/sync', requireAdmin, async function (req, res) {
+  const status = shopifyPriceSync.getStatus();
+
+  if (!status.enabled) {
+    res.status(409).json({
+      error: 'Shopify price sync is disabled',
+      shopifyPriceSync: status
+    });
+    return;
+  }
+
+  try {
+    const result = await shopifyPriceSync.sync('admin-request');
+    res.json({ result, shopifyPriceSync: shopifyPriceSync.getStatus() });
+  } catch (error) {
+    res.status(502).json({
+      error: error.message,
+      shopifyPriceSync: shopifyPriceSync.getStatus()
+    });
+  }
 });
 
 app.get('/api/price', function (req, res) {
@@ -359,4 +463,5 @@ upstreamSocket.on('connect_error', function (error) {
 
 server.listen(port, '0.0.0.0', function () {
   console.log(`Gold-rate relay listening on port ${port}`);
+  shopifyPriceSync.start();
 });
