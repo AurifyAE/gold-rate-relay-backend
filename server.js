@@ -6,6 +6,12 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const { io: connectUpstream } = require('socket.io-client');
 const { createShopifyPriceSync } = require('./shopify-price-sync');
+const {
+  applyCommercialPricing,
+  parseBoolean,
+  parsePercentage,
+  toShopifyCatalogPrice
+} = require('./commercial-pricing');
 
 const app = express();
 const server = http.createServer(app);
@@ -144,9 +150,15 @@ function calculateJewellery(params) {
   const diamondCt = numberOrZero(params.diamond);
   const stoneCost = numberOrZero(params.stone);
   const makingPct = numberOrZero(params.making || 12);
-  const vatExempt = booleanParam(params.vatExempt);
+  const vatApplicable = params.vatApplicable === undefined
+    ? !booleanParam(params.vatExempt)
+    : booleanParam(params.vatApplicable);
   const makingOnTotal = booleanParam(params.makingOnTotal);
   const vatOnAll = booleanParam(params.vatOnAll);
+  const premiumPercentage = numberOrZero(params.premiumPercentage);
+  const businessMarginPercentage = numberOrZero(
+    params.businessMarginPercentage
+  );
 
   const goldCost = grams * karatRate;
   const diamondCost = diamondCt * diamondRate;
@@ -157,26 +169,41 @@ function calculateJewellery(params) {
 
   const making = makingBase * (makingPct / 100);
   const subtotal = goldCost + diamondCost + stoneCost + making;
+  const commercial = applyCommercialPricing(subtotal, {
+    premiumPercentage,
+    businessMarginPercentage,
+    vatApplicable: false,
+    vatRate
+  });
 
   let vatBase = vatOnAll ? subtotal : goldCost + making;
-  if (vatExempt) vatBase = 0;
+  vatBase += commercial.premium + commercial.businessMargin;
+  if (!vatApplicable) vatBase = 0;
 
   const vat = vatBase * vatRate;
-  const total = subtotal + vat;
+  const taxExclusiveSubtotal = commercial.taxExclusiveSubtotal;
+  const total = taxExclusiveSubtotal + vat;
 
   return {
     total: Math.round(total),
+    taxExclusiveSubtotal: round2(taxExclusiveSubtotal),
+    baseCost: round2(subtotal),
     goldCost: Math.round(goldCost),
     diamCost: Math.round(diamondCost),
     stoneCost: Math.round(stoneCost),
     making: Math.round(making),
+    premiumPercentage,
+    premium: round2(commercial.premium),
+    businessMarginPercentage,
+    businessMargin: round2(commercial.businessMargin),
+    vatApplicable,
     vat: Math.round(vat),
     rateKarat: round2(karatRate),
     updatedAt: lastRatesUpdatedAt
   };
 }
 
-function calculateBullion(offerUsd, grams, purity, vatExempt) {
+function calculateBullion(offerUsd, grams, purity, pricing = {}) {
   const offer = numberOrZero(offerUsd);
   const weight = numberOrZero(grams);
   const fineness = bullionPurity[String(purity || '999.9')];
@@ -188,12 +215,24 @@ function calculateBullion(offerUsd, grams, purity, vatExempt) {
   const rate24kAed = (offer / troyOzToGram) * usdToAed;
   const ratePerGram = rate24kAed * fineness;
   const goldCost = weight * ratePerGram;
-  const vat = vatExempt ? 0 : goldCost * vatRate;
+  const commercial = applyCommercialPricing(goldCost, {
+    premiumPercentage: pricing.premiumPercentage,
+    businessMarginPercentage: pricing.businessMarginPercentage,
+    vatApplicable: pricing.vatApplicable,
+    vatRate
+  });
 
   return {
-    total: round2(goldCost + vat),
+    total: commercial.total,
+    taxExclusiveSubtotal: commercial.taxExclusiveSubtotal,
+    baseCost: round2(goldCost),
     goldCost: round2(goldCost),
-    vat: round2(vat),
+    premiumPercentage: commercial.premiumPercentage,
+    premium: commercial.premium,
+    businessMarginPercentage: commercial.businessMarginPercentage,
+    businessMargin: commercial.businessMargin,
+    vatApplicable: commercial.vatApplicable,
+    vat: commercial.vat,
     ratePerGram: round2(ratePerGram),
     rate24kAed: round2(rate24kAed),
     fineness,
@@ -201,7 +240,7 @@ function calculateBullion(offerUsd, grams, purity, vatExempt) {
   };
 }
 
-function calculateSilver(offerUsd, grams, vatExempt) {
+function calculateSilver(offerUsd, grams, pricing = {}) {
   const offer = numberOrZero(offerUsd);
   const weight = numberOrZero(grams);
 
@@ -211,12 +250,24 @@ function calculateSilver(offerUsd, grams, vatExempt) {
 
   const ratePerGram = (offer / troyOzToGram) * usdToAed;
   const silverCost = weight * ratePerGram;
-  const vat = vatExempt ? 0 : silverCost * vatRate;
+  const commercial = applyCommercialPricing(silverCost, {
+    premiumPercentage: pricing.premiumPercentage,
+    businessMarginPercentage: pricing.businessMarginPercentage,
+    vatApplicable: pricing.vatApplicable,
+    vatRate
+  });
 
   return {
-    total: round2(silverCost + vat),
+    total: commercial.total,
+    taxExclusiveSubtotal: commercial.taxExclusiveSubtotal,
+    baseCost: round2(silverCost),
     silverCost: round2(silverCost),
-    vat: round2(vat),
+    premiumPercentage: commercial.premiumPercentage,
+    premium: commercial.premium,
+    businessMarginPercentage: commercial.businessMarginPercentage,
+    businessMargin: commercial.businessMargin,
+    vatApplicable: commercial.vatApplicable,
+    vat: commercial.vat,
     ratePerGram: round2(ratePerGram),
     rawUsdOz: round2(offer)
   };
@@ -235,6 +286,65 @@ function metafieldValue(product, field) {
   return product && product[field] ? product[field].value : null;
 }
 
+function commercialPricingFromProduct(product) {
+  const premium = parsePercentage(
+    metafieldValue(product, 'premiumPercentage')
+  );
+  const margin = parsePercentage(
+    metafieldValue(product, 'businessMarginPercentage')
+  );
+  const vat = parseBoolean(
+    metafieldValue(product, 'vatApplicable'),
+    true
+  );
+
+  if (!premium.valid) {
+    return {
+      error: 'custom.premium_percentage must be between 0 and 100'
+    };
+  }
+
+  if (!margin.valid) {
+    return {
+      error: 'custom.business_margin_percentage must be between 0 and 100'
+    };
+  }
+
+  if (!vat.valid) {
+    return {
+      error: 'custom.vat_applicable must be true or false'
+    };
+  }
+
+  return {
+    premiumPercentage: premium.value,
+    businessMarginPercentage: margin.value,
+    vatApplicable: vat.value
+  };
+}
+
+function targetWithBreakdown(result, type) {
+  const shopifyCatalog = toShopifyCatalogPrice(result);
+
+  return {
+    price: shopifyCatalog.price,
+    taxable: shopifyCatalog.taxable,
+    type,
+    breakdown: {
+      baseCost: result.baseCost,
+      premiumPercentage: result.premiumPercentage,
+      premium: result.premium,
+      businessMarginPercentage: result.businessMarginPercentage,
+      businessMargin: result.businessMargin,
+      vatApplicable: result.vatApplicable,
+      vatRate,
+      vat: result.vat,
+      taxExclusiveSubtotal: result.taxExclusiveSubtotal,
+      storefrontPreviewTotal: result.total
+    }
+  };
+}
+
 function usableMarketOffer(symbol) {
   const market = latestMarket[symbol];
 
@@ -250,14 +360,19 @@ function calculateShopifyTargetPrice(product) {
     metafieldValue(product, 'silverWeight')
   );
   const purity = metafieldValue(product, 'goldPurity');
+  const commercialPricing = commercialPricingFromProduct(product);
+
+  if (commercialPricing.error) {
+    return { skipReason: commercialPricing.error };
+  }
 
   if (silverWeight > 0) {
     const result = calculateSilver(
       usableMarketOffer('SILVER'),
       silverWeight,
-      false
+      commercialPricing
     );
-    return result ? { price: result.total, type: 'silver' } : null;
+    return result ? targetWithBreakdown(result, 'silver') : null;
   }
 
   if (goldWeight > 0 && purity) {
@@ -265,9 +380,9 @@ function calculateShopifyTargetPrice(product) {
       usableMarketOffer('GOLD'),
       goldWeight,
       purity,
-      false
+      commercialPricing
     );
-    return result ? { price: result.total, type: 'bullion' } : null;
+    return result ? targetWithBreakdown(result, 'bullion') : null;
   }
 
   if (goldWeight > 0) {
@@ -277,11 +392,14 @@ function calculateShopifyTargetPrice(product) {
       diamond: metafieldValue(product, 'diamondCarat') || 0,
       stone: metafieldValue(product, 'stoneCost') || 0,
       making: metafieldValue(product, 'makingPercentage') || 12,
-      vatExempt: false,
+      premiumPercentage: commercialPricing.premiumPercentage,
+      businessMarginPercentage:
+        commercialPricing.businessMarginPercentage,
+      vatApplicable: commercialPricing.vatApplicable,
       makingOnTotal: false,
       vatOnAll: false
     });
-    return result ? { price: result.total, type: 'jewellery' } : null;
+    return result ? targetWithBreakdown(result, 'jewellery') : null;
   }
 
   return null;

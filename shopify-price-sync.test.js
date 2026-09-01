@@ -99,7 +99,7 @@ test('dry run plans only variants above the configured price delta', async () =>
   assert.equal(requests.length, 1);
 });
 
-test('groups a real price update by product', async () => {
+test('updates Shopify taxable state even when the price is unchanged', async () => {
   const requests = [];
   const fetchImpl = async (url, options) => {
     const request = JSON.parse(options.body);
@@ -117,6 +117,7 @@ test('groups a real price update by product', async () => {
                   id: 'gid://shopify/ProductVariant/9',
                   title: 'Default Title',
                   price: '75.00',
+                  taxable: true,
                   product: {
                     id: 'gid://shopify/Product/3',
                     title: 'Silver Bar'
@@ -136,7 +137,11 @@ test('groups a real price update by product', async () => {
         data: {
           productVariantsBulkUpdate: {
             productVariants: [
-              { id: 'gid://shopify/ProductVariant/9', price: '125.25' }
+              {
+                id: 'gid://shopify/ProductVariant/9',
+                price: '75.00',
+                taxable: false
+              }
             ],
             userErrors: []
           }
@@ -153,7 +158,7 @@ test('groups a real price update by product', async () => {
       minDelta: 1,
       mutationDelayMs: 0
     },
-    getTargetPrice: () => ({ price: 125.25 }),
+    getTargetPrice: () => ({ price: 75, taxable: false }),
     fetchImpl,
     logger: { info() {}, error() {} }
   });
@@ -166,7 +171,11 @@ test('groups a real price update by product', async () => {
   assert.deepEqual(requests[1].variables, {
     productId: 'gid://shopify/Product/3',
     variants: [
-      { id: 'gid://shopify/ProductVariant/9', price: '125.25' }
+      {
+        id: 'gid://shopify/ProductVariant/9',
+        price: '75.00',
+        taxable: false
+      }
     ]
   });
 });

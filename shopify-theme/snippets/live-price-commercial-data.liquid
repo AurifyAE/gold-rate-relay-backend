@@ -1,0 +1,22 @@
+{% comment %}
+  Outputs commercial-pricing data attributes for a live-price wrapper.
+
+  Usage:
+    {% render 'live-price-commercial-data', product_resource: product_resource %}
+
+  Missing percentage fields default to 0. Missing VAT applicability defaults
+  to true to preserve the existing storefront behavior.
+{% endcomment %}
+
+{%- liquid
+  assign live_premium_percentage = product_resource.metafields.custom.premium_percentage.value | default: 0
+  assign live_business_margin_percentage = product_resource.metafields.custom.business_margin_percentage.value | default: 0
+  assign live_vat_applicable = product_resource.metafields.custom.vat_applicable.value
+
+  if live_vat_applicable == blank
+    assign live_vat_applicable = true
+  endif
+-%}
+data-premium-percentage="{{ live_premium_percentage }}"
+data-business-margin-percentage="{{ live_business_margin_percentage }}"
+data-vat-applicable="{{ live_vat_applicable }}"

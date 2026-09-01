@@ -81,6 +81,57 @@
     return Number.isFinite(number) ? number : 0;
   }
 
+  function percentageOrNull(value) {
+    if (value === undefined || value === null || value === '') return 0;
+
+    var number = Number(value);
+    return Number.isFinite(number) && number >= 0 && number <= 100
+      ? number
+      : null;
+  }
+
+  function vatApplies(data) {
+    if (data.vatApplicable !== undefined) {
+      return data.vatApplicable === true ||
+        data.vatApplicable === 'true' ||
+        data.vatApplicable === '1';
+    }
+
+    return !data.vatExempt;
+  }
+
+  function applyCommercialPricing(
+    baseCost,
+    premiumPercentage,
+    businessMarginPercentage,
+    vatApplicable
+  ) {
+    var base = numberOrZero(baseCost);
+    var premiumPct = percentageOrNull(premiumPercentage);
+    var marginPct = percentageOrNull(businessMarginPercentage);
+
+    if (premiumPct === null || marginPct === null) return null;
+
+    var premium = base * (premiumPct / 100);
+    var subtotalAfterPremium = base + premium;
+    var businessMargin = base * (marginPct / 100);
+    var taxExclusiveSubtotal = subtotalAfterPremium + businessMargin;
+    var vat = vatApplicable
+      ? taxExclusiveSubtotal * CONFIG.vatRate
+      : 0;
+
+    return {
+      total: round2(taxExclusiveSubtotal + vat),
+      taxExclusiveSubtotal: round2(taxExclusiveSubtotal),
+      premiumPercentage: premiumPct,
+      premium: round2(premium),
+      businessMarginPercentage: marginPct,
+      businessMargin: round2(businessMargin),
+      vatApplicable: vatApplicable,
+      vat: round2(vat)
+    };
+  }
+
   function getKaratRate(karat) {
     var requested = String(karat || '22K').toUpperCase();
     var configuredRate = Number(CONFIG.djgRetailRates[requested]);
@@ -112,23 +163,42 @@
     var making = makingBase * (makingPct / 100);
     var subtotal = goldCost + diamondCost + stoneCost + making;
     var vatBase = data.vatOnAll ? subtotal : goldCost + making;
+    var commercial = applyCommercialPricing(
+      subtotal,
+      data.premiumPercentage,
+      data.businessMarginPercentage,
+      false
+    );
 
-    if (data.vatExempt) vatBase = 0;
+    if (!commercial) return null;
+
+    vatBase += commercial.premium + commercial.businessMargin;
+    if (!vatApplies(data)) vatBase = 0;
 
     var vat = vatBase * CONFIG.vatRate;
 
     return {
-      total: Math.round(subtotal + vat),
+      total: Math.round(
+        subtotal + commercial.premium + commercial.businessMargin + vat
+      ),
+      taxExclusiveSubtotal: round2(
+        subtotal + commercial.premium + commercial.businessMargin
+      ),
       goldCost: Math.round(goldCost),
       diamCost: Math.round(diamondCost),
       stoneCost: Math.round(stoneCost),
       making: Math.round(making),
+      premiumPercentage: commercial.premiumPercentage,
+      premium: commercial.premium,
+      businessMarginPercentage: commercial.businessMarginPercentage,
+      businessMargin: commercial.businessMargin,
+      vatApplicable: vatApplies(data),
       vat: Math.round(vat),
       rateKarat: round2(karatRate)
     };
   }
 
-  function calculateBullion(offerUsd, grams, purity, vatExempt) {
+  function calculateBullion(offerUsd, grams, purity, pricing) {
     var offer = Number(offerUsd || 0);
     var weight = Number(grams || 0);
     var fineness = CONFIG.bullionPurity[String(purity || '999.9')];
@@ -138,17 +208,30 @@
     var rate24kAed = offer / CONFIG.troyOzToGram * CONFIG.usdToAed;
     var ratePerGram = rate24kAed * fineness;
     var goldCost = weight * ratePerGram;
-    var vat = vatExempt ? 0 : goldCost * CONFIG.vatRate;
+    var commercial = applyCommercialPricing(
+      goldCost,
+      pricing && pricing.premiumPercentage,
+      pricing && pricing.businessMarginPercentage,
+      vatApplies(pricing || {})
+    );
+
+    if (!commercial) return null;
 
     return {
-      total: round2(goldCost + vat),
+      total: commercial.total,
+      taxExclusiveSubtotal: commercial.taxExclusiveSubtotal,
       goldCost: round2(goldCost),
-      vat: round2(vat),
+      premiumPercentage: commercial.premiumPercentage,
+      premium: commercial.premium,
+      businessMarginPercentage: commercial.businessMarginPercentage,
+      businessMargin: commercial.businessMargin,
+      vatApplicable: commercial.vatApplicable,
+      vat: commercial.vat,
       ratePerGram: round2(ratePerGram)
     };
   }
 
-  function calculateSilver(offerUsd, grams, vatExempt) {
+  function calculateSilver(offerUsd, grams, pricing) {
     var offer = Number(offerUsd || 0);
     var weight = Number(grams || 0);
 
@@ -156,12 +239,25 @@
 
     var ratePerGram = offer / CONFIG.troyOzToGram * CONFIG.usdToAed;
     var silverCost = weight * ratePerGram;
-    var vat = vatExempt ? 0 : silverCost * CONFIG.vatRate;
+    var commercial = applyCommercialPricing(
+      silverCost,
+      pricing && pricing.premiumPercentage,
+      pricing && pricing.businessMarginPercentage,
+      vatApplies(pricing || {})
+    );
+
+    if (!commercial) return null;
 
     return {
-      total: round2(silverCost + vat),
+      total: commercial.total,
+      taxExclusiveSubtotal: commercial.taxExclusiveSubtotal,
       silverCost: round2(silverCost),
-      vat: round2(vat),
+      premiumPercentage: commercial.premiumPercentage,
+      premium: commercial.premium,
+      businessMarginPercentage: commercial.businessMarginPercentage,
+      businessMargin: commercial.businessMargin,
+      vatApplicable: commercial.vatApplicable,
+      vat: commercial.vat,
       ratePerGram: round2(ratePerGram)
     };
   }
@@ -208,7 +304,7 @@
         this.offer,
         data.goldGrams,
         data.purity,
-        Boolean(data.vatExempt)
+        data
       );
     },
 
@@ -216,7 +312,7 @@
       return Promise.resolve(calculateSilver(
         this._currentSilverUsd,
         data.silverGrams,
-        Boolean(data.vatExempt)
+        data
       ));
     }
   };
@@ -507,7 +603,7 @@
       window.GoldRate.offer,
       wrapper.dataset.gold,
       wrapper.dataset.purity || '999.9',
-      wrapper.dataset.vatExempt === 'true'
+      wrapper.dataset
     );
 
     grApplyToCard(wrapper, result);
@@ -517,7 +613,7 @@
     var result = calculateSilver(
       window.GoldRate._currentSilverUsd,
       wrapper.dataset.silverGrams,
-      wrapper.dataset.vatExempt === 'true'
+      wrapper.dataset
     );
 
     grApplyToCard(wrapper, result);
@@ -530,6 +626,10 @@
       diamond: wrapper.dataset.diamond || 0,
       stone: wrapper.dataset.stone || 0,
       making: wrapper.dataset.making || 12,
+      premiumPercentage: wrapper.dataset.premiumPercentage || 0,
+      businessMarginPercentage:
+        wrapper.dataset.businessMarginPercentage || 0,
+      vatApplicable: wrapper.dataset.vatApplicable,
       vatExempt: wrapper.dataset.vatExempt === 'true',
       makingOnTotal: wrapper.dataset.makingOnTotal === 'true',
       vatOnAll: wrapper.dataset.vatOnAll === 'true'

@@ -154,7 +154,56 @@ custom.silver_weight
 custom.diamond_carat
 custom.stone_cost
 custom.making_percentage
+custom.premium_percentage
+custom.business_margin_percentage
+custom.vat_applicable
 ```
+
+Create the three commercial-pricing definitions in Shopify Admin under
+**Settings → Custom data → Products**:
+
+| Name | Namespace and key | Type | Default behavior |
+| --- | --- | --- | --- |
+| Premium percentage | `custom.premium_percentage` | Number (decimal) | `0` |
+| Business margin percentage | `custom.business_margin_percentage` | Number (decimal) | `0` |
+| VAT applicable | `custom.vat_applicable` | True or false | `true` |
+
+Restrict both percentages to the range 0–100 in their Shopify definitions.
+The backend skips a product instead of changing its price when either value is
+invalid. The final price is calculated in this order:
+
+```text
+metal/product cost
++ premium percentage of cost
++ business margin percentage of cost
++ VAT on the resulting subtotal when VAT applicable is true
+```
+
+`VAT_RATE` controls the VAT percentage globally and defaults to `0.05`.
+The Shopify catalog sync always writes the tax-exclusive subtotal. It also
+sets the variant's Shopify `taxable` flag from `custom.vat_applicable`, so
+Shopify can calculate the destination tax once at checkout. The VAT-inclusive
+`total` is only a storefront preview/reporting value and is never written as
+the variant price.
+
+To keep product cards and cart estimates aligned with checkout, upload
+`shopify-theme/snippets/live-price-commercial-data.liquid` to the theme. Add
+this inside every `.live-gold-price-wrapper` opening tag in `price.liquid`:
+
+```liquid
+{% render 'live-price-commercial-data', product_resource: product_resource %}
+```
+
+Add the same line to both live-price wrappers in `cart-products.liquid`, using
+the cart product:
+
+```liquid
+{% render 'live-price-commercial-data', product_resource: item.product %}
+```
+
+Remove the old hard-coded `data-vat-exempt="false"` attribute from those
+wrappers. The relay remains backward compatible with it, but the new
+`data-vat-applicable` value takes precedence.
 
 For safety, synchronization stops with an error if the Shopify store currency
 does not match `SHOPIFY_PRICE_CURRENCY`.

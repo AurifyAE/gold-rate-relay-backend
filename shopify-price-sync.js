@@ -10,6 +10,7 @@ const PRODUCT_VARIANTS_QUERY = `
         id
         title
         price
+        taxable
         product {
           id
           title
@@ -34,6 +35,15 @@ const PRODUCT_VARIANTS_QUERY = `
           makingPercentage: metafield(namespace: "custom", key: "making_percentage") {
             value
           }
+          premiumPercentage: metafield(namespace: "custom", key: "premium_percentage") {
+            value
+          }
+          businessMarginPercentage: metafield(namespace: "custom", key: "business_margin_percentage") {
+            value
+          }
+          vatApplicable: metafield(namespace: "custom", key: "vat_applicable") {
+            value
+          }
         }
       }
       pageInfo {
@@ -56,6 +66,7 @@ const UPDATE_VARIANTS_MUTATION = `
       productVariants {
         id
         price
+        taxable
       }
       userErrors {
         field
@@ -269,6 +280,9 @@ function createShopifyPriceSync(options) {
 
       const targetPrice = Math.round(Number(target.price) * 100) / 100;
       const currentPrice = Number(variant.price);
+      const hasTargetTaxable = typeof target.taxable === 'boolean';
+      const taxableChanged = hasTargetTaxable &&
+        variant.taxable !== target.taxable;
 
       if (targetPrice <= 0) {
         result.skippedVariants += 1;
@@ -279,7 +293,8 @@ function createShopifyPriceSync(options) {
 
       if (
         Number.isFinite(currentPrice) &&
-        Math.abs(targetPrice - currentPrice) < minDelta
+        Math.abs(targetPrice - currentPrice) < minDelta &&
+        !taxableChanged
       ) {
         result.unchangedVariants += 1;
         continue;
@@ -289,14 +304,20 @@ function createShopifyPriceSync(options) {
         updatesByProduct.set(variant.product.id, []);
       }
 
-      updatesByProduct.get(variant.product.id).push({
+      const variantUpdate = {
         id: variant.id,
         price: targetPrice.toFixed(2)
-      });
+      };
+
+      if (hasTargetTaxable) {
+        variantUpdate.taxable = target.taxable;
+      }
+
+      updatesByProduct.get(variant.product.id).push(variantUpdate);
       result.plannedVariants += 1;
 
       if (result.sampleChanges.length < auditSampleSize) {
-        result.sampleChanges.push({
+        const sampleChange = {
           product: variant.product.title,
           variant: variant.title,
           variantId: variant.id,
@@ -305,7 +326,20 @@ function createShopifyPriceSync(options) {
             ? currentPrice.toFixed(2)
             : null,
           targetPrice: targetPrice.toFixed(2)
-        });
+        };
+
+        if (hasTargetTaxable) {
+          sampleChange.currentTaxable = typeof variant.taxable === 'boolean'
+            ? variant.taxable
+            : null;
+          sampleChange.targetTaxable = target.taxable;
+        }
+
+        if (target.breakdown) {
+          sampleChange.breakdown = target.breakdown;
+        }
+
+        result.sampleChanges.push(sampleChange);
       }
     }
 
