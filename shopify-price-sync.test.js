@@ -44,13 +44,21 @@ test('dry run plans only variants above the configured price delta', async () =>
             nodes: [
               {
                 id: 'gid://shopify/ProductVariant/1',
+                title: 'Default Title',
                 price: '99.50',
-                product: { id: 'gid://shopify/Product/1' }
+                product: {
+                  id: 'gid://shopify/Product/1',
+                  title: 'Gold Ring'
+                }
               },
               {
                 id: 'gid://shopify/ProductVariant/2',
+                title: 'Default Title',
                 price: '90.00',
-                product: { id: 'gid://shopify/Product/1' }
+                product: {
+                  id: 'gid://shopify/Product/1',
+                  title: 'Gold Ring'
+                }
               }
             ],
             pageInfo: { hasNextPage: false, endCursor: null }
@@ -78,6 +86,16 @@ test('dry run plans only variants above the configured price delta', async () =>
   assert.equal(result.unchangedVariants, 1);
   assert.equal(result.plannedVariants, 1);
   assert.equal(result.updatedVariants, 0);
+  assert.deepEqual(result.sampleChanges, [
+    {
+      product: 'Gold Ring',
+      variant: 'Default Title',
+      variantId: 'gid://shopify/ProductVariant/2',
+      priceType: 'live',
+      currentPrice: '90.00',
+      targetPrice: '100.00'
+    }
+  ]);
   assert.equal(requests.length, 1);
 });
 
@@ -97,8 +115,12 @@ test('groups a real price update by product', async () => {
               nodes: [
                 {
                   id: 'gid://shopify/ProductVariant/9',
+                  title: 'Default Title',
                   price: '75.00',
-                  product: { id: 'gid://shopify/Product/3' }
+                  product: {
+                    id: 'gid://shopify/Product/3',
+                    title: 'Silver Bar'
+                  }
                 }
               ],
               pageInfo: { hasNextPage: false, endCursor: null }

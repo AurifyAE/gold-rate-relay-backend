@@ -8,6 +8,7 @@ const PRODUCT_VARIANTS_QUERY = `
     productVariants(first: 100, after: $after) {
       nodes {
         id
+        title
         price
         product {
           id
@@ -127,6 +128,10 @@ function createShopifyPriceSync(options) {
   );
   const minDelta = positiveNumber(config.minDelta, 1);
   const mutationDelayMs = positiveNumber(config.mutationDelayMs, 250);
+  const auditSampleSize = Math.max(
+    1,
+    Math.min(25, positiveNumber(config.auditSampleSize, 10))
+  );
 
   if (typeof getTargetPrice !== 'function') {
     throw new Error('Shopify price sync requires getTargetPrice(product)');
@@ -237,7 +242,9 @@ function createShopifyPriceSync(options) {
       skippedVariants: 0,
       plannedVariants: 0,
       updatedVariants: 0,
-      updatedProducts: 0
+      updatedProducts: 0,
+      sampleChanges: [],
+      sampleSkipped: []
     };
 
     for (const variant of variants) {
@@ -245,6 +252,18 @@ function createShopifyPriceSync(options) {
 
       if (!target || !Number.isFinite(Number(target.price))) {
         result.skippedVariants += 1;
+
+        if (result.sampleSkipped.length < auditSampleSize) {
+          result.sampleSkipped.push({
+            product: variant.product.title,
+            variant: variant.title,
+            variantId: variant.id,
+            reason: target && target.skipReason
+              ? target.skipReason
+              : 'No calculable live price'
+          });
+        }
+
         continue;
       }
 
@@ -275,6 +294,19 @@ function createShopifyPriceSync(options) {
         price: targetPrice.toFixed(2)
       });
       result.plannedVariants += 1;
+
+      if (result.sampleChanges.length < auditSampleSize) {
+        result.sampleChanges.push({
+          product: variant.product.title,
+          variant: variant.title,
+          variantId: variant.id,
+          priceType: target.type || 'live',
+          currentPrice: Number.isFinite(currentPrice)
+            ? currentPrice.toFixed(2)
+            : null,
+          targetPrice: targetPrice.toFixed(2)
+        });
+      }
     }
 
     return { updatesByProduct, result };

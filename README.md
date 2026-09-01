@@ -127,7 +127,10 @@ SHOPIFY_PRICE_CURRENCY=AED
 
 After deployment, inspect `GET /api/health`. The
 `shopifyPriceSync.lastResult` object reports scanned, eligible, unchanged, and
-planned variants. You can also request an immediate protected run:
+planned variants. It also includes `sampleChanges` with up to ten product
+names, current prices, calculated target prices, and pricing types, plus
+`sampleSkipped` for products that were not eligible. You can also request an
+immediate protected run:
 
 ```bash
 curl -X POST https://YOUR_BACKEND_DOMAIN/api/admin/shopify/sync \

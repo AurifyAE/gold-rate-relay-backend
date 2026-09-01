@@ -298,7 +298,8 @@ const shopifyPriceSync = createShopifyPriceSync({
     intervalMs: process.env.SHOPIFY_PRICE_SYNC_INTERVAL_MS,
     initialDelayMs: process.env.SHOPIFY_PRICE_SYNC_INITIAL_DELAY_MS,
     minDelta: process.env.SHOPIFY_PRICE_MIN_DELTA_AED,
-    mutationDelayMs: process.env.SHOPIFY_PRICE_MUTATION_DELAY_MS
+    mutationDelayMs: process.env.SHOPIFY_PRICE_MUTATION_DELAY_MS,
+    auditSampleSize: process.env.SHOPIFY_PRICE_AUDIT_SAMPLE_SIZE
   },
   getTargetPrice: calculateShopifyTargetPrice,
   logger: console
